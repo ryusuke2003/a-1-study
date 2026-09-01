@@ -230,18 +230,26 @@ def main() -> int:
         if not all(section in record for section in ("### 問題", "### 模範解答", "### 解説")):
             errors.append(f"{label}: 誤答記録に問題・模範解答・解説がそろっていません")
             continue
-        if not all(re.search(rf"^- {choice}: .+", record, re.MULTILINE) for choice in "ABCD"):
-            errors.append(f"{label}: 解説にA〜Dの選択肢別説明がそろっていません")
-            continue
         options = dict(
             re.findall(r"^- \[[ x]\] ([A-D])\. (.+)$", str(review["block"]), re.MULTILINE)
         )
+        if set(options) != set("ABCD"):
+            errors.append(f"{label}: 元SessionにA〜Dの選択肢がそろっていません")
+            continue
         for choice, option in options.items():
-            explanation = re.search(rf"^- {choice}: (.+)$", record, re.MULTILINE)
-            if explanation and explanation.group(1).strip() == option.strip():
-                errors.append(f"{label}: {choice}の説明が選択肢本文の再掲だけです")
-            if explanation and any(
-                phrase in explanation.group(1)
+            formatted = re.search(
+                rf"^- {choice}: (.+)\n  → (.+)$", record, re.MULTILINE
+            )
+            if not formatted:
+                errors.append(f"{label}: {choice}が『元の選択肢 → 解説』形式ではありません")
+                continue
+            recorded_option, explanation = formatted.groups()
+            if recorded_option.strip() != option.strip():
+                errors.append(f"{label}: {choice}の元の選択肢本文がSessionと一致しません")
+            if explanation.strip() == option.strip():
+                errors.append(f"{label}: {choice}の解説が選択肢本文の再掲だけです")
+            if any(
+                phrase in explanation
                 for phrase in (
                     "この用語が表す役割・概念です",
                     "設問で示された条件・役割を表す説明です",
