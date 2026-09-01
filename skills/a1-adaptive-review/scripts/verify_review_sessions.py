@@ -238,10 +238,12 @@ def main() -> int:
             continue
         for choice, option in options.items():
             formatted = re.search(
-                rf"^- {choice}: (.+)\n  → (.+)$", record, re.MULTILINE
+                rf"^- {choice}: (.+)<br>\n  → (.+)$", record, re.MULTILINE
             )
             if not formatted:
-                errors.append(f"{label}: {choice}が『元の選択肢 → 解説』形式ではありません")
+                errors.append(
+                    f"{label}: {choice}が『元の選択肢<br> 改行 → 解説』形式ではありません"
+                )
                 continue
             recorded_option, explanation = formatted.groups()
             if recorded_option.strip() != option.strip():
