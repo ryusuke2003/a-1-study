@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from datetime import date, timedelta
 import re
 from pathlib import Path
 
@@ -10,6 +11,16 @@ ROOT = Path(__file__).resolve().parents[3]
 SESSIONS = ROOT / "学習記録" / "復習問題"
 WRONG = ROOT / "学習記録" / "間違った問題"
 CARDS = ROOT / "復習カード" / "カード一覧.md"
+
+
+def expected_next_review(graded_on: str, source_stage: int, result: str) -> str:
+    day = date.fromisoformat(graded_on)
+    if result != "correct":
+        return str(day + timedelta(days=1))
+    stage = source_stage + 1
+    intervals = {1: 3, 2: 7, 3: 14, 4: 30, 5: 60}
+    days = intervals.get(stage, 120 * (2 ** max(stage - 6, 0)))
+    return str(day + timedelta(days=days))
 
 
 def chunks(text: str, pattern: str) -> list[re.Match[str]]:
@@ -39,8 +50,8 @@ def load_cards(errors: list[str]) -> dict[str, dict[str, str]]:
     return cards
 
 
-def load_wrong_records() -> dict[tuple[str, int, int, str], list[str]]:
-    records: dict[tuple[str, int, int, str], list[str]] = defaultdict(list)
+def load_wrong_records() -> dict[tuple[str, int, int, str], list[tuple[str, str]]]:
+    records: dict[tuple[str, int, int, str], list[tuple[str, str]]] = defaultdict(list)
     heading = r"^## Session (\d+) / Q(\d+): (A1-\d+)\n(.*?)(?=^## |\Z)"
     for path in sorted(WRONG.glob("*.md")):
         for match in chunks(path.read_text(), heading):
@@ -51,7 +62,7 @@ def load_wrong_records() -> dict[tuple[str, int, int, str], list[str]]:
                 re.MULTILINE,
             )
             source_name = Path(source.group(1)).name if source else ""
-            records[(source_name, int(session), int(qno), card_id)].append(body)
+            records[(source_name, int(session), int(qno), card_id)].append((path.stem, body))
     return records
 
 
@@ -96,7 +107,7 @@ def main() -> int:
                 qlabel = f"{label} Q{qno}"
                 card_id = field(block, "Card ID", r"A1-\d+")
                 stage_text = field(block, "Stage", r"\d+\+?")
-                selected = re.findall(r"^- \[x\] ([A-E])\. ", block, re.MULTILINE)
+                selected = re.findall(r"^- \[[xX]\] ([A-E])\. ", block, re.MULTILINE)
                 grades = chunks(block, r"^### 採点\n(.*?)(?=^### Q\d+|\Z)")
                 if card_id is None:
                     errors.append(f"{qlabel}: Card IDがありません")
@@ -132,6 +143,15 @@ def main() -> int:
                     errors.append(f"{qlabel}: A〜D選択時のResultをunknownにはできません")
                 if re.search(r"^#### 解説$", grade, re.MULTILINE):
                     errors.append(f"{qlabel}: 通常Sessionの採点欄に解説があります")
+                if graded_on and stage_text:
+                    expected_date = expected_next_review(
+                        graded_on, int(stage_text.rstrip("+")), result_value
+                    )
+                    if next_review.group(1) != expected_date:
+                        errors.append(
+                            f"{qlabel}: Next Reviewは採点日・Stage・Resultから求めた"
+                            f" {expected_date} でなければなりません"
+                        )
 
                 reviews.append(
                     {
@@ -226,7 +246,11 @@ def main() -> int:
                 f"{label}: 元Sessionを含む照合キーに一致する誤答記録がちょうど一つではありません"
             )
             continue
-        record = records[0]
+        record_date, record = records[0]
+        if record_date != review["graded_on"]:
+            errors.append(
+                f"{label}: 誤答記録の日付 {record_date} が採点日 {review['graded_on']} と一致しません"
+            )
         if not all(section in record for section in ("### 問題", "### 模範解答", "### 解説")):
             errors.append(f"{label}: 誤答記録に問題・模範解答・解説がそろっていません")
             continue
