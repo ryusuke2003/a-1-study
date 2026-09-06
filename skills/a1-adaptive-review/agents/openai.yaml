@@ -1,0 +1,4 @@
+interface:
+  display_name: "A-1 適応復習"
+  short_description: "登録した学びを整理し、必要な手順だけで出題・採点する"
+  default_prompt: "学習者の依頼を分類し、a1-adaptive-reviewの該当手順に従って処理してください。"
