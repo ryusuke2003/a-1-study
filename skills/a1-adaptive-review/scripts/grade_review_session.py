@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Prepare and atomically apply grading for one A-1 review session."""
+"""Grade one A-1 Session with validation, cooperative locking and rollback."""
 from __future__ import annotations
 
 import argparse
 from collections import Counter
+from contextlib import contextmanager, nullcontext
 from datetime import date, timedelta
 import hashlib
 import json
@@ -14,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 
 DEFAULT_ROOT = Path(__file__).resolve().parents[3]
@@ -25,10 +27,122 @@ FORBIDDEN_EXPLANATIONS = (
     "正解の選択肢です",
 )
 FINAL_RESULTS = {"correct", "incorrect", "unknown"}
+CARDS_PATH = Path("\u5fa9\u7fd2\u30ab\u30fc\u30c9/\u30ab\u30fc\u30c9\u4e00\u89a7.md")
+SESSIONS_PATH = Path("\u5b66\u7fd2\u8a18\u9332/\u5fa9\u7fd2\u554f\u984c")
+NOTES_PATH = Path("\u5b66\u3093\u3060\u3053\u3068")
+LOCK_NAME = ".a1-grading.lock"
 
 
 class GradingError(ValueError):
     """Raised when grading input or repository state is invalid."""
+
+
+
+def positive_integer(value: Any, label: str) -> int:
+    # Legacy digit strings remain valid; bool and fractional numbers never are.
+    if type(value) is int and value > 0:
+        return value
+    if isinstance(value, str) and re.fullmatch(r"[1-9]\d*", value):
+        return int(value)
+    raise GradingError(f"{label} must be a positive integer")
+
+
+def strict_date(value: Any, label: str) -> date:
+    try:
+        if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            raise ValueError(value)
+        return date.fromisoformat(value)
+    except ValueError as error:
+        raise GradingError(f"{label} must be a valid YYYY-MM-DD date") from error
+
+
+def inside(root: Path, path: Path, label: str) -> Path:
+    resolved = path.resolve()
+    if not resolved.is_relative_to(root.resolve()):
+        raise GradingError(f"{label} must stay inside {root}")
+    return resolved
+
+
+def session_path_for(root: Path, filename: str) -> Path:
+    if not isinstance(filename, str) or not filename:
+        raise GradingError("session_file must be a non-empty string")
+    path = inside(root, root / filename, "session_file")
+    directory = inside(root, root / SESSIONS_PATH, "Session directory")
+    if path.parent != directory or path.suffix != ".md" or path.name == "README.md":
+        raise GradingError("session_file must name a Markdown file in the review Session directory")
+    return path
+
+
+def card_rows(text: str) -> dict[str, list[str]]:
+    rows: dict[str, list[str]] = {}
+    for line in text.splitlines():
+        if not re.match(r"^\s*\|\s*A1-", line):
+            continue
+        values = [v.strip() for v in line.strip().strip("|").split("|")]
+        if len(values) != 8:
+            raise GradingError("Card table must have eight columns")
+        cid = values[0]
+        if not re.fullmatch(r"A1-\d+", cid) or cid in rows:
+            raise GradingError(f"Invalid or duplicate Card ID: {cid}")
+        if not re.fullmatch(r"\d+", values[6]):
+            raise GradingError(f"{cid}: Stage must be a non-negative integer")
+        if values[7] not in FINAL_RESULTS | {"unreviewed", "new"}:
+            raise GradingError(f"{cid}: unsupported Last Result")
+        strict_date(values[5], f"{cid} Next Review")
+        if values[4] != "-":
+            strict_date(values[4], f"{cid} Last Reviewed")
+        rows[cid] = values
+    return rows
+
+
+def validate_card_state(rows: dict[str, list[str]], questions: list[dict[str, Any]],
+                        graded_on: str, session_text: str) -> None:
+    day = strict_date(graded_on, "graded_on")
+    created = field(session_text, "Created")
+    if created and day < strict_date(created, "Created"):
+        raise GradingError("graded_on must not precede Session creation")
+    ids = [q["card_id"] for q in questions]
+    if len(ids) != len(set(ids)):
+        raise GradingError("A Session must not grade the same Card ID twice")
+    for question in questions:
+        cid = question["card_id"]
+        if cid not in rows:
+            raise GradingError(f"Unknown Card ID: {cid}")
+        row = rows[cid]
+        if int(row[6]) != question["stage"]:
+            raise GradingError(f"{cid}: stale Stage; reconcile the Session with the current card before grading")
+        if row[4] != "-" and day < strict_date(row[4], "Last Reviewed"):
+            raise GradingError(f"{cid}: grading must not move Last Reviewed backwards")
+
+
+def card_digests(rows: dict[str, list[str]], questions: list[dict[str, Any]]) -> dict[str, str]:
+    return {q["card_id"]: hashlib.sha256(json.dumps(rows[q["card_id"]], ensure_ascii=False).encode()).hexdigest()
+            for q in questions}
+
+
+@contextmanager
+def grading_lock(root: Path):
+    """Serialize cooperating writers. A killed process leaves a visible recovery lock."""
+    path = root / LOCK_NAME
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError as error:
+        raise GradingError(f"Grading is locked: {path}; check the other process before removing a stale lock") from error
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(f"pid={os.getpid()}\n")
+        yield
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise GradingError(f"Duplicate JSON key: {key}")
+        result[key] = value
+    return result
 
 
 def field(text: str, name: str, pattern: str = r"[^\n]+") -> str | None:
@@ -120,26 +234,31 @@ def session_digest(session_text: str) -> str:
 
 
 def load_card_points(cards_path: Path) -> dict[str, str]:
-    points: dict[str, str] = {}
-    for line in cards_path.read_text().splitlines():
-        if not re.match(r"^\| A1-\d+ \|", line):
-            continue
-        values = [value.strip() for value in line.strip().strip("|").split("|")]
-        if len(values) == 8:
-            points[values[0]] = values[2]
-    return points
+    return {cid: row[2] for cid, row in card_rows(cards_path.read_text(encoding="utf-8")).items()}
 
 
-def source_excerpt(session_path: Path, source: str | None, terms: list[str]) -> str:
+def source_excerpt(session_path: Path, source: str | None, terms: list[str], *,
+                   root: Path | None = None,
+                   cache: dict[Path, list[str]] | None = None) -> str:
     if not source:
         return ""
-    path = (session_path.parent / source.split("#", 1)[0]).resolve()
-    if not path.exists():
-        return ""
-    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", path.read_text()) if part.strip()]
+    root = root or session_path.parents[2]
+    url = urlsplit(source)
+    if url.scheme or url.netloc or url.query:
+        raise GradingError("Source must be a local Markdown note, not an external URL")
+    notes = inside(root, root / NOTES_PATH, "Note directory")
+    path = inside(notes, session_path.parent / unquote(url.path), "Source")
+    if path.suffix != ".md" or not path.is_file():
+        raise GradingError(f"Source note is missing or not Markdown: {path}")
+    # Cache lasts for one prepare only: no stale content across separate invocations.
+    if cache is None:
+        cache = {}
+    if path not in cache:
+        cache[path] = [part.strip() for part in re.split(r"\n\s*\n", path.read_text(encoding="utf-8")) if part.strip()]
+    paragraphs = cache[path]
     tokens: list[str] = []
     for term in terms:
-        tokens.extend(re.findall(r"[A-Za-z][A-Za-z0-9+./-]*|[一-龥ァ-ヶー]{2,}", term))
+        tokens.extend(re.findall(r"[A-Za-z][A-Za-z0-9+./-]*|[\u4e00-\u9fa5\u30a1-\u30f6\u30fc]{2,}", term))
     scored = sorted(
         ((sum(token.lower() in paragraph.lower() for token in tokens), paragraph) for paragraph in paragraphs),
         reverse=True,
@@ -149,14 +268,19 @@ def source_excerpt(session_path: Path, source: str | None, terms: list[str]) -> 
 
 
 def make_draft(root: Path, session_file: str, session_number: int, graded_on: str) -> dict[str, Any]:
-    session_path = (root / session_file).resolve()
-    text = session_path.read_text()
+    root = root.resolve()
+    session_number = positive_integer(session_number, "session")
+    session_path = session_path_for(root, session_file)
+    text = session_path.read_text(encoding="utf-8")
     _, _, session_text = find_session(text, session_number)
     status = field(session_text, "Status")
     if status != "awaiting_answers":
         raise GradingError(f"Status が awaiting_answers ではありません: {status}")
     questions = validate_session(session_text)
-    points = load_card_points(root / "復習カード" / "カード一覧.md")
+    rows = card_rows(inside(root, root / CARDS_PATH, "Card table").read_text(encoding="utf-8"))
+    validate_card_state(rows, questions, graded_on, session_text)
+    points = {cid: row[2] for cid, row in rows.items()}
+    cache: dict[Path, list[str]] = {}
     entries: list[dict[str, Any]] = []
     for question in questions:
         card_point = points.get(question["card_id"] or "", "")
@@ -164,6 +288,7 @@ def make_draft(root: Path, session_file: str, session_number: int, graded_on: st
             session_path,
             question["source"],
             [card_point, question["problem"], *question["options"].values()],
+            root=root, cache=cache,
         )
         forced_unknown = question["selected"] in (None, "E")
         entries.append(
@@ -184,9 +309,10 @@ def make_draft(root: Path, session_file: str, session_number: int, graded_on: st
             }
         )
     return {
-        "session_file": str(Path(session_file)),
+        "session_file": session_path.relative_to(root).as_posix(),
         "session": session_number,
         "session_sha256": session_digest(session_text),
+        "card_sha256": card_digests(rows, questions),
         "graded_on": graded_on,
         "questions": entries,
     }
@@ -203,7 +329,10 @@ def validate_explanations(entry: dict[str, Any], question: dict[str, Any]) -> No
     if not isinstance(explanations, dict) or set(explanations) != set("ABCD"):
         raise GradingError(f"Q{question['q']}: A〜Dの解説がそろっていません")
     for choice in "ABCD":
-        explanation = str(explanations[choice]).strip()
+        raw = explanations[choice]
+        if not isinstance(raw, str) or "\n" in raw or "\r" in raw:
+            raise GradingError(f"Q{question['q']}: {choice} explanation must be a single-line string")
+        explanation = raw.strip()
         if not explanation or explanation.startswith("DRAFT:"):
             raise GradingError(f"Q{question['q']}: {choice}の下書きを完成させてください")
         if explanation == question["options"][choice] or len(explanation) < 12:
@@ -213,11 +342,13 @@ def validate_explanations(entry: dict[str, Any], question: dict[str, Any]) -> No
 
 
 def next_review(graded_on: str, source_stage: int, result: str) -> tuple[int, str]:
-    day = date.fromisoformat(graded_on)
+    day = strict_date(graded_on, "graded_on")
     if result != "correct":
         return 0, str(day + timedelta(days=1))
     stage = source_stage + 1
     intervals = {1: 3, 2: 7, 3: 14, 4: 30, 5: 60}
+    if stage > 28:
+        raise GradingError("Review interval exceeds the supported calendar range")
     days = intervals.get(stage, 120 * (2 ** max(stage - 6, 0)))
     return stage, str(day + timedelta(days=days))
 
@@ -233,7 +364,7 @@ def replace_grade(question_block: str, grade: str) -> str:
     if len(option_e) != 1:
         raise GradingError("Eの選択肢がちょうど一つではありません")
     position = option_e[0].end()
-    return clean[:position] + "\n\n" + grade.rstrip() + "\n" + clean[position:].lstrip("\n")
+    return clean[:position] + "\n\n" + grade.rstrip() + "\n\n" + clean[position:].lstrip("\n")
 
 
 def update_session(
@@ -313,7 +444,7 @@ def mistake_record(item: dict[str, Any], session_file: str, session_number: int)
     lines = [
         f"## Session {session_number} / Q{question['q']}: {question['card_id']}",
         "",
-        f"- Source Session: [{Path(session_file).stem} 復習問題](../復習問題/{Path(session_file).name})",
+        f"- Source Session: [{Path(session_file).stem} 復習問題](../復習問題/{Path(session_file).name}#session-{session_number})",
         f"- Your Answer: {your_answer}",
         f"- Correct Answer: {correct}. {options[correct]}",
         "", "### 問題", "", question["problem"], "", "### 模範解答", "",
@@ -333,33 +464,47 @@ def update_mistakes(current: str, applied: list[dict[str, Any]], session_file: s
         if item["result"] == "correct":
             continue
         heading = f"## Session {session_number} / Q{item['q']}: {item['card_id']}"
-        if re.search(rf"^{re.escape(heading)}$", base, re.MULTILINE):
+        matches = re.finditer(rf"^{re.escape(heading)}\n(.*?)(?=^## |\Z)", base, re.MULTILINE | re.DOTALL)
+        for match in matches:
+            source = re.search(r"^- Source Session: \[[^]]*\]\(([^)]+)\)$", match[1], re.MULTILINE)
+            if source and Path(unquote(urlsplit(source[1]).path)).name != Path(session_file).name:
+                continue
             raise GradingError(f"誤答記録が既に存在します: {heading}")
     return base.rstrip() + "\n\n" + "\n\n".join(record.rstrip() for record in records) + "\n"
 
 
-def atomic_write(path: Path, text: str) -> None:
+def atomic_write(path: Path, text: str | bytes, *, mode: int | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    mode = path.stat().st_mode & 0o777 if path.exists() else 0o644
-    with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False, encoding="utf-8") as handle:
-        handle.write(text)
-        temporary = Path(handle.name)
-    os.chmod(temporary, mode)
-    os.replace(temporary, path)
+    mode = mode if mode is not None else (path.stat().st_mode & 0o777 if path.exists() else 0o644)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile("wb", dir=path.parent, delete=False) as handle:
+            temporary = Path(handle.name)
+            handle.write(text.encode("utf-8") if isinstance(text, str) else text)
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def apply_manifest(root: Path, manifest_path: Path, dry_run: bool = False) -> Counter[str]:
-    manifest = json.loads(manifest_path.read_text())
-    session_file = str(manifest["session_file"])
-    session_number = int(manifest["session"])
-    graded_on = str(manifest["graded_on"])
-    date.fromisoformat(graded_on)
-    session_path = (root / session_file).resolve()
-    try:
-        session_path.relative_to(root.resolve())
-    except ValueError as error:
-        raise GradingError("session_file はリポジトリ内を指定してください") from error
-    session_text = session_path.read_text()
+    root = root.resolve()
+    with nullcontext() if dry_run else grading_lock(root):
+        return _apply_manifest(root, manifest_path, dry_run)
+
+
+def _apply_manifest(root: Path, manifest_path: Path, dry_run: bool = False) -> Counter[str]:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"), object_pairs_hook=unique_json_object)
+    if not isinstance(manifest, dict):
+        raise GradingError("Manifest must be a JSON object")
+    session_number = positive_integer(manifest.get("session"), "session")
+    graded_on = manifest.get("graded_on")
+    strict_date(graded_on, "graded_on")
+    session_path = session_path_for(root, manifest.get("session_file"))
+    session_file = session_path.relative_to(root).as_posix()
+    session_bytes = session_path.read_bytes()
+    session_text = session_bytes.decode("utf-8").replace("\r\n", "\n")
     start, end, session_block = find_session(session_text, session_number)
     if field(session_block, "Status") != "awaiting_answers":
         raise GradingError("対象Sessionは awaiting_answers ではありません")
@@ -369,26 +514,40 @@ def apply_manifest(root: Path, manifest_path: Path, dry_run: bool = False) -> Co
     raw_entries = manifest.get("questions")
     if not isinstance(raw_entries, list):
         raise GradingError("questions は配列で指定してください")
-    entries = {int(entry["q"]): entry for entry in raw_entries}
+    if any(not isinstance(entry, dict) for entry in raw_entries):
+        raise GradingError("Each question entry must be a JSON object")
+    entries = {positive_integer(entry.get("q"), "q"): entry for entry in raw_entries}
     if set(entries) != {question["q"] for question in questions} or len(entries) != len(raw_entries):
         raise GradingError("マニフェストはSessionの全Q番号を重複なく含めてください")
+    cards_path = inside(root, root / CARDS_PATH, "Card table")
+    cards_bytes = cards_path.read_bytes()
+    cards_text = cards_bytes.decode("utf-8").replace("\r\n", "\n")
+    rows = card_rows(cards_text)
+    validate_card_state(rows, questions, graded_on, session_block)
+    if "card_sha256" in manifest and manifest["card_sha256"] != card_digests(rows, questions):
+        raise GradingError("Card changed since prepare; regenerate and review the manifest")
+    for question in questions:
+        entry = entries[question["q"]]
+        for key, value in (("card_id", question["card_id"]), ("selected", question["selected"] or "unselected")):
+            if key in entry and entry[key] != value:
+                raise GradingError(f"Q{question['q']}: manifest {key} does not match the Session")
     new_session_block, applied, results = update_session(session_block, questions, entries, graded_on)
     new_session_text = session_text[:start] + new_session_block + session_text[end:]
-    cards_path = root / "復習カード" / "カード一覧.md"
-    cards_text = cards_path.read_text()
     new_cards_text = update_cards(cards_text, applied, graded_on)
     mistakes_path = root / "学習記録" / "間違えた問題" / f"{graded_on}.md"
+    mistakes_path = inside(root, mistakes_path, "Mistake record")
     mistakes_existed = mistakes_path.exists()
-    mistakes_text = mistakes_path.read_text() if mistakes_existed else ""
+    mistakes_bytes = mistakes_path.read_bytes() if mistakes_existed else None
+    mistakes_text = mistakes_bytes.decode("utf-8").replace("\r\n", "\n") if mistakes_bytes is not None else ""
     new_mistakes_text = update_mistakes(
         mistakes_text, applied, session_file, session_number, graded_on
     )
     if dry_run:
         return results
     originals = {
-        session_path: session_text,
-        cards_path: cards_text,
-        mistakes_path: mistakes_text if mistakes_existed else None,
+        session_path: session_bytes,
+        cards_path: cards_bytes,
+        mistakes_path: mistakes_bytes,
     }
     try:
         atomic_write(session_path, new_session_text)
@@ -396,10 +555,10 @@ def apply_manifest(root: Path, manifest_path: Path, dry_run: bool = False) -> Co
         if new_mistakes_text != mistakes_text:
             atomic_write(mistakes_path, new_mistakes_text)
         verifier = root / "skills" / "a1-adaptive-review" / "scripts" / "verify_review_sessions.py"
-        completed = subprocess.run([sys.executable, str(verifier)], cwd=root, text=True, capture_output=True)
+        completed = subprocess.run([sys.executable, str(verifier)], cwd=root, text=True, capture_output=True, timeout=30)
         if completed.returncode:
             raise GradingError("自動検査に失敗しました:\n" + completed.stdout + completed.stderr)
-    except Exception:
+    except BaseException:
         for path, content in originals.items():
             if content is None:
                 if path.exists():
@@ -411,10 +570,16 @@ def apply_manifest(root: Path, manifest_path: Path, dry_run: bool = False) -> Co
 
 
 def cleanup_moved_comments(root: Path, dry_run: bool = False) -> int:
+    with nullcontext() if dry_run else grading_lock(root):
+        return _cleanup_moved_comments(root, dry_run)
+
+
+def _cleanup_moved_comments(root: Path, dry_run: bool = False) -> int:
     pattern = re.compile(r"\n?<!-- 採点日\d{4}-\d{2}-\d{2}へ移動済み\n.*?-->\n?", re.DOTALL)
     removed = 0
     for path in sorted((root / "学習記録" / "間違えた問題").glob("*.md")):
-        text = path.read_text()
+        path = inside(root, path, "Mistake record")
+        text = path.read_text(encoding="utf-8")
         cleaned, count = pattern.subn("\n", text)
         if count:
             removed += count
@@ -448,7 +613,9 @@ def main() -> int:
             draft = make_draft(root, args.session_file, args.session, args.graded_on)
             output = json.dumps(draft, ensure_ascii=False, indent=2) + "\n"
             if args.output:
-                atomic_write(args.output, output)
+                if args.output.resolve().is_relative_to(root):
+                    raise GradingError("Draft output must be outside the repository (for example /tmp)")
+                atomic_write(args.output, output, mode=0o600)
                 print(f"下書きを生成: {args.output} ({len(draft['questions'])}問)")
             else:
                 print(output, end="")
@@ -460,7 +627,7 @@ def main() -> int:
             removed = cleanup_moved_comments(root, args.dry_run)
             mode = "検出" if args.dry_run else "削除"
             print(f"移動済みコメント残骸: {removed}件{mode}")
-    except (GradingError, KeyError, json.JSONDecodeError, OSError) as error:
+    except (GradingError, KeyError, ValueError, OSError, subprocess.TimeoutExpired, OverflowError) as error:
         print(f"エラー: {error}", file=sys.stderr)
         return 1
     return 0

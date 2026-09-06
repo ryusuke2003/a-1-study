@@ -2,3 +2,6 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+
+# Cooperative grading lock; never commit runtime state
+.a1-grading.lock
