@@ -2,6 +2,7 @@
 """Verify graded A-1 review sessions without modifying study data."""
 from __future__ import annotations
 
+import argparse
 from collections import Counter, defaultdict
 from datetime import date, timedelta
 import re
@@ -19,6 +20,8 @@ def expected_next_review(graded_on: str, source_stage: int, result: str) -> str:
         return str(day + timedelta(days=1))
     stage = source_stage + 1
     intervals = {1: 3, 2: 7, 3: 14, 4: 30, 5: 60}
+    if stage > 28:
+        raise ValueError("Review interval exceeds the supported calendar range")
     days = intervals.get(stage, 120 * (2 ** max(stage - 6, 0)))
     return str(day + timedelta(days=days))
 
@@ -32,15 +35,50 @@ def field(text: str, name: str, pattern: str) -> str | None:
     return match.group(1) if match else None
 
 
-def load_cards(errors: list[str]) -> dict[str, dict[str, str]]:
+def markdown_section(text: str, heading: str) -> str | None:
+    """Return a level-3 section body regardless of legacy blank-line spacing."""
+    match = re.search(
+        rf"^### {re.escape(heading)}[ \t]*\n+(.*?)(?=^### |\Z)",
+        text,
+        re.MULTILINE | re.DOTALL,
+    )
+    return match.group(1).strip() if match else None
+
+
+def source_problem_text(text: str) -> str | None:
+    """Return the Session problem body up to option A, tolerating compact spacing."""
+    match = re.search(
+        r"^### 問題[ \t]*\n+(.*?)(?=^- \[[ xX]\] A\.)",
+        text,
+        re.MULTILINE | re.DOTALL,
+    )
+    return match.group(1).strip() if match else None
+
+
+def load_cards(errors: list[str], path: Path = CARDS) -> dict[str, dict[str, str]]:
     cards: dict[str, dict[str, str]] = {}
-    for line in CARDS.read_text().splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         if not re.match(r"^\| A1-\d+ \|", line):
             continue
         values = [value.strip() for value in line.strip().strip("|").split("|")]
         if len(values) != 8:
             errors.append(f"カード一覧: {values[0]} の列数が8ではありません")
             continue
+        if values[0] in cards:
+            errors.append(f"Duplicate Card ID: {values[0]}")
+            continue
+        if not re.fullmatch(r"\d+", values[6]):
+            errors.append(f"{values[0]}: invalid Stage")
+        if values[7] not in {"correct", "incorrect", "unknown", "unreviewed", "new"}:
+            errors.append(f"{values[0]}: invalid Last Result")
+        for label, value in (("Next Review", values[5]), ("Last Reviewed", values[4])):
+            if label == "Last Reviewed" and value == "-":
+                continue
+            try:
+                if date.fromisoformat(value).isoformat() != value:
+                    raise ValueError(value)
+            except ValueError:
+                errors.append(f"{values[0]}: invalid {label}")
         cards[values[0]] = {
             "last_reviewed": values[4],
             "next_review": values[5],
@@ -50,10 +88,10 @@ def load_cards(errors: list[str]) -> dict[str, dict[str, str]]:
     return cards
 
 
-def load_mistake_records() -> dict[tuple[str, int, int, str], list[tuple[str, str]]]:
+def load_mistake_records(directory: Path = MISTAKES) -> dict[tuple[str, int, int, str], list[tuple[str, str]]]:
     records: dict[tuple[str, int, int, str], list[tuple[str, str]]] = defaultdict(list)
     heading = r"^## Session (\d+) / Q(\d+): (A1-\d+)\n(.*?)(?=^## |\Z)"
-    for path in sorted(MISTAKES.glob("*.md")):
+    for path in sorted(directory.glob("*.md")):
         for match in chunks(path.read_text(), heading):
             session, qno, card_id, body = match.groups()
             source = re.search(
@@ -66,14 +104,20 @@ def load_mistake_records() -> dict[tuple[str, int, int, str], list[tuple[str, st
     return records
 
 
-def main() -> int:
+def verify(root: Path) -> int:
     errors: list[str] = []
-    cards = load_cards(errors)
-    mistake_records = load_mistake_records()
+    sessions = root / "学習記録/復習問題"
+    mistakes = root / "学習記録/間違えた問題"
+    cards_path = root / "復習カード/カード一覧.md"
+    if not sessions.is_dir() or not cards_path.is_file():
+        print("Verification failed: missing review directory or card table")
+        return 1
+    cards = load_cards(errors, cards_path)
+    mistake_records = load_mistake_records(mistakes)
     reviews: list[dict[str, object]] = []
     checked = 0
 
-    for path in sorted(SESSIONS.glob("*.md")):
+    for path in sorted(sessions.glob("*.md")):
         if path.name == "README.md":
             continue
         text = path.read_text()
@@ -85,14 +129,23 @@ def main() -> int:
             if status == "completed":
                 errors.append(f"{label}: 旧Status completedをgradedへ移行してください")
                 continue
+            if status == "awaiting_answers":
+                continue
             if status != "graded":
+                errors.append(f"{label}: invalid or missing Status")
                 continue
 
             checked += 1
             graded_on = field(body, "Graded", r"\d{4}-\d{2}-\d{2}")
+            if graded_on:
+                try:
+                    date.fromisoformat(graded_on)
+                except ValueError:
+                    errors.append(f"{label}: invalid Graded date")
+                    continue
             declared = field(body, "Question Count", r"\d+")
             questions = chunks(body, r"^### Q(\d+)\n(.*?)(?=^### Q\d+|\Z)")
-            if declared is None or int(declared) != len(questions):
+            if declared is None or int(declared) < 1 or int(declared) != len(questions):
                 errors.append(f"{label}: Question Count が実際の設問数と一致しません")
             numbers = [int(question.group(1)) for question in questions]
             if numbers != list(range(1, len(questions) + 1)):
@@ -255,11 +308,31 @@ def main() -> int:
             errors.append(f"{label}: 誤答記録に問題・模範解答・解説がそろっていません")
             continue
         options = dict(
-            re.findall(r"^- \[[ x]\] ([A-D])\. (.+)$", str(review["block"]), re.MULTILINE)
+            re.findall(r"^- \[[ xX]\] ([A-D])\. (.+)$", str(review["block"]), re.MULTILINE)
         )
         if set(options) != set("ABCD"):
             errors.append(f"{label}: 元SessionにA〜Dの選択肢がそろっていません")
             continue
+        source_block = str(review["block"])
+        selections = re.findall(r"^- \[[xX]\] ([A-E])\. (.+)$", source_block, re.MULTILINE)
+        expected_answer = (
+            f"{selections[0][0]}. {selections[0][1]}" if selections else "未選択"
+        )
+        if field(record, "Your Answer", r"[^\n]+") != expected_answer:
+            errors.append(f"{label}: Your Answer does not match the Session")
+        correct = field(record, "Correct Answer", r"[^\n]+")
+        answer_match = re.fullmatch(r"([A-D])\. (.+)", correct or "")
+        if not answer_match or options.get(answer_match[1]) != answer_match[2]:
+            errors.append(f"{label}: Correct Answer must match one original option")
+        elif selections and selections[0][0] == answer_match[1]:
+            errors.append(f"{label}: incorrect answer is marked as the correct option")
+        model = markdown_section(record, "模範解答")
+        if model != correct:
+            errors.append(f"{label}: model answer does not match Correct Answer")
+        original_problem = source_problem_text(source_block)
+        copied_problem = markdown_section(record, "問題")
+        if original_problem is None or copied_problem is None or original_problem != copied_problem:
+            errors.append(f"{label}: copied problem does not match the Session")
         for choice, option in options.items():
             formatted = re.search(
                 rf"^- {choice}: (.+)<br>\n  → (.+)$", record, re.MULTILINE
@@ -303,6 +376,16 @@ def main() -> int:
         return 1
     print(f"検査成功: graded session {checked}件")
     return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, default=ROOT)
+    args = parser.parse_args()
+    try:
+        return verify(args.root.resolve())
+    except (OSError, ValueError, OverflowError) as error:
+        parser.exit(1, f"Verification failed: {error}\n")
 
 
 if __name__ == "__main__":
