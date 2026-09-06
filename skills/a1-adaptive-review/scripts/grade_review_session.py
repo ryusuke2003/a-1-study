@@ -268,7 +268,7 @@ def update_cards(cards_text: str, applied: list[dict[str, Any]], graded_on: str)
     return "\n".join(lines) + "\n"
 
 
-def wrong_record(item: dict[str, Any], session_file: str, session_number: int) -> str:
+def review_tomorrow_record(item: dict[str, Any], session_file: str, session_number: int) -> str:
     question = item
     entry = item["entry"]
     selected = question["selected"]
@@ -289,11 +289,11 @@ def wrong_record(item: dict[str, Any], session_file: str, session_number: int) -
     return "\n".join(lines) + "\n"
 
 
-def update_wrong(current: str, applied: list[dict[str, Any]], session_file: str, session_number: int, graded_on: str) -> str:
-    records = [wrong_record(item, session_file, session_number) for item in applied if item["result"] != "correct"]
+def update_review_tomorrow(current: str, applied: list[dict[str, Any]], session_file: str, session_number: int, graded_on: str) -> str:
+    records = [review_tomorrow_record(item, session_file, session_number) for item in applied if item["result"] != "correct"]
     if not records:
         return current
-    base = current or f"# {graded_on} 間違った問題\n"
+    base = current or f"# {graded_on} 明日復習する問題\n"
     for item in applied:
         if item["result"] == "correct":
             continue
@@ -340,18 +340,24 @@ def apply_manifest(root: Path, manifest_path: Path, dry_run: bool = False) -> Co
     cards_path = root / "復習カード" / "カード一覧.md"
     cards_text = cards_path.read_text()
     new_cards_text = update_cards(cards_text, applied, graded_on)
-    wrong_path = root / "学習記録" / "間違った問題" / f"{graded_on}.md"
-    wrong_existed = wrong_path.exists()
-    wrong_text = wrong_path.read_text() if wrong_existed else ""
-    new_wrong_text = update_wrong(wrong_text, applied, session_file, session_number, graded_on)
+    review_tomorrow_path = root / "学習記録" / "明日復習する問題" / f"{graded_on}.md"
+    review_tomorrow_existed = review_tomorrow_path.exists()
+    review_tomorrow_text = review_tomorrow_path.read_text() if review_tomorrow_existed else ""
+    new_review_tomorrow_text = update_review_tomorrow(
+        review_tomorrow_text, applied, session_file, session_number, graded_on
+    )
     if dry_run:
         return results
-    originals = {session_path: session_text, cards_path: cards_text, wrong_path: wrong_text if wrong_existed else None}
+    originals = {
+        session_path: session_text,
+        cards_path: cards_text,
+        review_tomorrow_path: review_tomorrow_text if review_tomorrow_existed else None,
+    }
     try:
         atomic_write(session_path, new_session_text)
         atomic_write(cards_path, new_cards_text)
-        if new_wrong_text != wrong_text:
-            atomic_write(wrong_path, new_wrong_text)
+        if new_review_tomorrow_text != review_tomorrow_text:
+            atomic_write(review_tomorrow_path, new_review_tomorrow_text)
         verifier = root / "skills" / "a1-adaptive-review" / "scripts" / "verify_review_sessions.py"
         completed = subprocess.run([sys.executable, str(verifier)], cwd=root, text=True, capture_output=True)
         if completed.returncode:
@@ -370,7 +376,7 @@ def apply_manifest(root: Path, manifest_path: Path, dry_run: bool = False) -> Co
 def cleanup_moved_comments(root: Path, dry_run: bool = False) -> int:
     pattern = re.compile(r"\n?<!-- 採点日\d{4}-\d{2}-\d{2}へ移動済み\n.*?-->\n?", re.DOTALL)
     removed = 0
-    for path in sorted((root / "学習記録" / "間違った問題").glob("*.md")):
+    for path in sorted((root / "学習記録" / "明日復習する問題").glob("*.md")):
         text = path.read_text()
         cleaned, count = pattern.subn("\n", text)
         if count:

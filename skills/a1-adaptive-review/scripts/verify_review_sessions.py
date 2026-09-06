@@ -9,7 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 SESSIONS = ROOT / "学習記録" / "復習問題"
-WRONG = ROOT / "学習記録" / "間違った問題"
+REVIEW_TOMORROW = ROOT / "学習記録" / "明日復習する問題"
 CARDS = ROOT / "復習カード" / "カード一覧.md"
 
 
@@ -50,10 +50,10 @@ def load_cards(errors: list[str]) -> dict[str, dict[str, str]]:
     return cards
 
 
-def load_wrong_records() -> dict[tuple[str, int, int, str], list[tuple[str, str]]]:
+def load_review_tomorrow_records() -> dict[tuple[str, int, int, str], list[tuple[str, str]]]:
     records: dict[tuple[str, int, int, str], list[tuple[str, str]]] = defaultdict(list)
     heading = r"^## Session (\d+) / Q(\d+): (A1-\d+)\n(.*?)(?=^## |\Z)"
-    for path in sorted(WRONG.glob("*.md")):
+    for path in sorted(REVIEW_TOMORROW.glob("*.md")):
         for match in chunks(path.read_text(), heading):
             session, qno, card_id, body = match.groups()
             source = re.search(
@@ -69,7 +69,7 @@ def load_wrong_records() -> dict[tuple[str, int, int, str], list[tuple[str, str]
 def main() -> int:
     errors: list[str] = []
     cards = load_cards(errors)
-    wrong_records = load_wrong_records()
+    review_tomorrow_records = load_review_tomorrow_records()
     reviews: list[dict[str, object]] = []
     checked = 0
 
@@ -228,7 +228,7 @@ def main() -> int:
                     f"{label}: 最新採点から期待されるStage {expected_stage} とカード一覧が一致しません"
                 )
 
-    expected_wrong: set[tuple[str, int, int, str]] = set()
+    expected_review_tomorrow: set[tuple[str, int, int, str]] = set()
     for review in reviews:
         if review["result"] == "correct":
             continue
@@ -238,9 +238,9 @@ def main() -> int:
             int(review["qno"]),
             str(review["card_id"]),
         )
-        expected_wrong.add(key)
+        expected_review_tomorrow.add(key)
         label = str(review["label"])
-        records = wrong_records.get(key, [])
+        records = review_tomorrow_records.get(key, [])
         if len(records) != 1:
             errors.append(
                 f"{label}: 元Sessionを含む照合キーに一致する誤答記録がちょうど一つではありません"
@@ -286,8 +286,8 @@ def main() -> int:
             ):
                 errors.append(f"{label}: {choice}の説明が禁止された定型文です")
 
-    for key, records in wrong_records.items():
-        if key not in expected_wrong:
+    for key, records in review_tomorrow_records.items():
+        if key not in expected_review_tomorrow:
             errors.append(
                 f"誤答記録 {key[0]} Session {key[1]} Q{key[2]} {key[3]}: "
                 "対応する誤答・不明の採点がありません"
