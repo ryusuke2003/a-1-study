@@ -57,7 +57,7 @@ class RepositoryFixture:
     def __init__(self, root: Path, count: int, selected: str = "A") -> None:
         self.root = root
         (root / "学習記録/復習問題").mkdir(parents=True)
-        (root / "学習記録/明日復習する問題").mkdir(parents=True)
+        (root / "学習記録/間違えた問題").mkdir(parents=True)
         (root / "復習カード").mkdir(parents=True)
         (root / "学んだこと").mkdir(parents=True)
         scripts = root / "skills/a1-adaptive-review/scripts"
@@ -132,7 +132,7 @@ class GradeReviewSessionTest(unittest.TestCase):
             )
             cards = (root / "復習カード/カード一覧.md").read_text()
             self.assertEqual(30, cards.count("| 2026-09-02 | 2026-09-05 | 1 | correct |"))
-            self.assertFalse((root / "学習記録/明日復習する問題/2026-09-02.md").exists())
+            self.assertFalse((root / "学習記録/間違えた問題/2026-09-02.md").exists())
 
     def test_wrong_answer_requires_and_writes_all_choice_explanations(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -150,12 +150,12 @@ class GradeReviewSessionTest(unittest.TestCase):
 
             GRADER.apply_manifest(root, manifest_path)
 
-            review_tomorrow = (root / "学習記録/明日復習する問題/2026-09-02.md").read_text()
-            self.assertIn("### 問題", review_tomorrow)
-            self.assertIn("### 模範解答", review_tomorrow)
+            mistakes = (root / "学習記録/間違えた問題/2026-09-02.md").read_text()
+            self.assertIn("### 問題", mistakes)
+            self.assertIn("### 模範解答", mistakes)
             for choice in "ABCD":
-                self.assertIn(f"- {choice}:", review_tomorrow)
-                self.assertIn(f"→ {explanation(choice)}", review_tomorrow)
+                self.assertIn(f"- {choice}:", mistakes)
+                self.assertIn(f"→ {explanation(choice)}", mistakes)
 
     def test_draft_explanations_cannot_be_applied(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -196,14 +196,14 @@ class GradeReviewSessionTest(unittest.TestCase):
 
             self.assertEqual(original_session, fixture.session.read_text())
             self.assertEqual(original_cards, cards_path.read_text())
-            self.assertFalse((root / "学習記録/明日復習する問題/2026-09-02.md").exists())
+            self.assertFalse((root / "学習記録/間違えた問題/2026-09-02.md").exists())
 
     def test_cleanup_removes_moved_comment_without_touching_visible_record(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            review_tomorrow_dir = root / "学習記録/明日復習する問題"
-            review_tomorrow_dir.mkdir(parents=True)
-            path = review_tomorrow_dir / "2026-09-01.md"
+            mistakes_dir = root / "学習記録/間違えた問題"
+            mistakes_dir.mkdir(parents=True)
+            path = mistakes_dir / "2026-09-01.md"
             path.write_text(
                 "# 記録\n\n## Session 1 / Q1: A1-0001\n本文\n\n"
                 "<!-- 採点日2026-09-02へ移動済み\n## Session 1 / Q2: A1-0002\n旧本文\n-->\n"
