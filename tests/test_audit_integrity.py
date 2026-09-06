@@ -10,8 +10,8 @@ import unittest
 from test_grade_review_session import GRADER as G, RepositoryFixture, explanation
 
 SCRIPT=Path(G.__file__).with_name('verify_review_sessions.py')
-MISTAKES=Path('\u5b66\u7fd2\u8a18\u9332/\u9593\u9055\u3048\u305f\u554f\u984c')
-CARDS=Path('\u5fa9\u7fd2\u30ab\u30fc\u30c9/\u30ab\u30fc\u30c9\u4e00\u89a7.md')
+MISTAKES=Path('学習記録/間違えた問題')
+CARDS=Path('復習カード/カード一覧.md')
 
 
 class AuditIntegrityTest(unittest.TestCase):
@@ -39,9 +39,14 @@ class AuditIntegrityTest(unittest.TestCase):
         self.assertEqual(0,process.returncode,process.stdout+process.stderr)
         self.assertEqual(before,{p:p.read_bytes() for p in self.root.rglob('*') if p.is_file()})
 
+    def test_legacy_compact_mistake_sections_are_accepted(self):
+        self.mistakes.write_text(self.mistakes.read_text().replace('\n\n','\n'))
+        p=self.audit()
+        self.assertEqual(0,p.returncode,p.stdout+p.stderr)
+
     def test_wrong_copied_problem_is_detected(self):
         text=self.mistakes.read_text()
-        text=text.replace('A1-0001\u306b\u3064\u3044\u3066', 'A1-9999\u306b\u3064\u3044\u3066')
+        text=text.replace('A1-0001について', 'A1-9999について')
         self.mistakes.write_text(text)
         p=self.audit()
         self.assertNotEqual(0,p.returncode)
@@ -49,7 +54,7 @@ class AuditIntegrityTest(unittest.TestCase):
 
     def test_wrong_model_answer_is_detected(self):
         text=self.mistakes.read_text()
-        label='### \u6a21\u7bc4\u89e3\u7b54\n\n'
+        label='### 模範解答\n\n'
         text=text.replace(label+'A.',label+'B.')
         self.mistakes.write_text(text)
         p=self.audit()
