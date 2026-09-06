@@ -93,9 +93,11 @@ class SelectReviewCardsTest(unittest.TestCase):
         result = SELECTOR.select_cards(cards, 10, date(2026, 9, 6))
 
         self.assertEqual(10, result["selected_count"])
-        self.assertEqual(7, result["actual_buckets"]["deadline"])
+        self.assertEqual(7, result["quotas"]["deadline"])
+        self.assertEqual(9, result["actual_buckets"]["deadline"])
         self.assertEqual(1, result["actual_buckets"]["new_or_upcoming"])
-        self.assertEqual(2, result["actual_buckets"]["backfill"])
+        self.assertEqual(2, result["backfilled_count"])
+        self.assertNotIn("backfill", result["actual_buckets"])
 
     def test_learning_day_changes_at_five_in_jst(self) -> None:
         timezone = ZoneInfo("Asia/Tokyo")
@@ -120,3 +122,4 @@ class SelectReviewCardsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
