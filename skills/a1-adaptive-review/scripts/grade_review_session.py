@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from datetime import date, timedelta
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -37,6 +38,9 @@ def field(text: str, name: str, pattern: str = r"[^\n]+") -> str | None:
 
 def find_session(text: str, number: int) -> tuple[int, int, str]:
     matches = list(re.finditer(r"^## Session (\d+)\n", text, re.MULTILINE))
+    numbers = [int(match.group(1)) for match in matches]
+    if len(numbers) != len(set(numbers)):
+        raise GradingError("Session numbers must be unique within the file")
     for index, match in enumerate(matches):
         if int(match.group(1)) != number:
             continue
@@ -51,24 +55,39 @@ def parse_questions(session_text: str) -> list[dict[str, Any]]:
     for index, match in enumerate(matches):
         end = matches[index + 1].start() if index + 1 < len(matches) else len(session_text)
         block = session_text[match.start():end].rstrip() + "\n"
-        options = dict(re.findall(r"^- \[[ xX]\] ([A-D])\. (.+)$", block, re.MULTILINE))
-        selected = re.findall(r"^- \[[xX]\] ([A-E])\. (.+)$", block, re.MULTILINE)
+        raw_options = re.findall(
+            r"^- \[([^\]]*)\] ([A-Za-z])\. (.*)$", block, re.MULTILINE
+        )
+        if [choice for _, choice, _ in raw_options] != list("ABCDE"):
+            raise GradingError(f"Q{match.group(1)}: require exactly A, B, C, D, E in order")
+        if any(mark not in (" ", "x", "X") or not text.strip()
+               for mark, _, text in raw_options):
+            raise GradingError(f"Q{match.group(1)}: invalid checkbox or empty option")
+        if raw_options[-1][2].strip() != "わかりません":
+            raise GradingError(f"Q{match.group(1)}: E must be the unknown option")
+        options = {choice: text for _, choice, text in raw_options if choice in "ABCD"}
+        selected = [(choice, text) for mark, choice, text in raw_options if mark in ("x", "X")]
         problem = re.search(
             r"^### 問題\n\n(.+?)\n\n- \[[ xX]\] A\.", block, re.MULTILINE | re.DOTALL
         )
         source = re.search(r"^- Source: \[[^]]+\]\(([^)]+)\)$", block, re.MULTILINE)
-        if set(options) != set("ABCD"):
-            raise GradingError(f"Q{match.group(1)}: A〜Dの選択肢がそろっていません")
+        card_id = field(block, "Card ID", r"A1-\d+")
+        stage_text = field(block, "Stage", r"\d+\+?")
+        for name, value in (("Card ID", card_id), ("Stage", stage_text)):
+            if value is None or len(re.findall(rf"^- {re.escape(name)}:", block, re.MULTILINE)) != 1:
+                raise GradingError(f"Q{match.group(1)}: require one valid {name}")
+        if not problem or not problem.group(1).strip():
+            raise GradingError(f"Q{match.group(1)}: problem text is missing")
         if len(selected) > 1:
-            raise GradingError(f"Q{match.group(1)}: 選択済みの選択肢が複数あります")
+            raise GradingError(f"Q{match.group(1)}: multiple options are selected")
         questions.append(
             {
                 "q": int(match.group(1)),
                 "start": match.start(),
                 "end": end,
                 "block": block,
-                "card_id": field(block, "Card ID", r"A1-\d+"),
-                "stage": int((field(block, "Stage", r"\d+\+?") or "0").rstrip("+")),
+                "card_id": card_id,
+                "stage": int(stage_text.rstrip("+")),
                 "problem": problem.group(1).strip() if problem else "",
                 "options": options,
                 "selected": selected[0][0] if selected else None,
@@ -80,6 +99,24 @@ def parse_questions(session_text: str) -> list[dict[str, Any]]:
     if numbers != list(range(1, len(questions) + 1)):
         raise GradingError("Q番号がQ1から連番ではありません")
     return questions
+
+
+def validate_session(session_text: str) -> list[dict[str, Any]]:
+    """Validate the same Session contract in prepare, preflight and apply."""
+    header = re.split(r"^### Q\d+\n", session_text, maxsplit=1, flags=re.MULTILINE)[0]
+    for name in ("Status", "Question Count"):
+        if len(re.findall(rf"^- {re.escape(name)}:", header, re.MULTILINE)) != 1:
+            raise GradingError(f"Session must contain exactly one {name}")
+    declared = field(header, "Question Count", r"\d+")
+    questions = parse_questions(session_text)
+    if declared is None or int(declared) < 1 or int(declared) != len(questions):
+        raise GradingError("Question Count must be positive and match every question")
+    return questions
+
+
+def session_digest(session_text: str) -> str:
+    """Detect a stale draft; this is not a security signature or answer key."""
+    return hashlib.sha256(session_text.encode("utf-8")).hexdigest()
 
 
 def load_card_points(cards_path: Path) -> dict[str, str]:
@@ -118,10 +155,7 @@ def make_draft(root: Path, session_file: str, session_number: int, graded_on: st
     status = field(session_text, "Status")
     if status != "awaiting_answers":
         raise GradingError(f"Status が awaiting_answers ではありません: {status}")
-    questions = parse_questions(session_text)
-    declared = int(field(session_text, "Question Count", r"\d+") or "-1")
-    if declared != len(questions):
-        raise GradingError("Question Count が実際の設問数と一致しません")
+    questions = validate_session(session_text)
     points = load_card_points(root / "復習カード" / "カード一覧.md")
     entries: list[dict[str, Any]] = []
     for question in questions:
@@ -152,6 +186,7 @@ def make_draft(root: Path, session_file: str, session_number: int, graded_on: st
     return {
         "session_file": str(Path(session_file)),
         "session": session_number,
+        "session_sha256": session_digest(session_text),
         "graded_on": graded_on,
         "questions": entries,
     }
@@ -328,7 +363,9 @@ def apply_manifest(root: Path, manifest_path: Path, dry_run: bool = False) -> Co
     start, end, session_block = find_session(session_text, session_number)
     if field(session_block, "Status") != "awaiting_answers":
         raise GradingError("対象Sessionは awaiting_answers ではありません")
-    questions = parse_questions(session_block)
+    questions = validate_session(session_block)
+    if "session_sha256" in manifest and manifest["session_sha256"] != session_digest(session_block):
+        raise GradingError("Session changed since prepare; regenerate and review the full manifest")
     raw_entries = manifest.get("questions")
     if not isinstance(raw_entries, list):
         raise GradingError("questions は配列で指定してください")
