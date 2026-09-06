@@ -35,6 +35,26 @@ def field(text: str, name: str, pattern: str) -> str | None:
     return match.group(1) if match else None
 
 
+def markdown_section(text: str, heading: str) -> str | None:
+    """Return a level-3 section body regardless of legacy blank-line spacing."""
+    match = re.search(
+        rf"^### {re.escape(heading)}[ \t]*\n+(.*?)(?=^### |\Z)",
+        text,
+        re.MULTILINE | re.DOTALL,
+    )
+    return match.group(1).strip() if match else None
+
+
+def source_problem_text(text: str) -> str | None:
+    """Return the Session problem body up to option A, tolerating compact spacing."""
+    match = re.search(
+        r"^### 問題[ \t]*\n+(.*?)(?=^- \[[ xX]\] A\.)",
+        text,
+        re.MULTILINE | re.DOTALL,
+    )
+    return match.group(1).strip() if match else None
+
+
 def load_cards(errors: list[str], path: Path = CARDS) -> dict[str, dict[str, str]]:
     cards: dict[str, dict[str, str]] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -86,9 +106,9 @@ def load_mistake_records(directory: Path = MISTAKES) -> dict[tuple[str, int, int
 
 def verify(root: Path) -> int:
     errors: list[str] = []
-    sessions = root / "\u5b66\u7fd2\u8a18\u9332/\u5fa9\u7fd2\u554f\u984c"
-    mistakes = root / "\u5b66\u7fd2\u8a18\u9332/\u9593\u9055\u3048\u305f\u554f\u984c"
-    cards_path = root / "\u5fa9\u7fd2\u30ab\u30fc\u30c9/\u30ab\u30fc\u30c9\u4e00\u89a7.md"
+    sessions = root / "学習記録/復習問題"
+    mistakes = root / "学習記録/間違えた問題"
+    cards_path = root / "復習カード/カード一覧.md"
     if not sessions.is_dir() or not cards_path.is_file():
         print("Verification failed: missing review directory or card table")
         return 1
@@ -293,11 +313,11 @@ def verify(root: Path) -> int:
         if set(options) != set("ABCD"):
             errors.append(f"{label}: 元SessionにA〜Dの選択肢がそろっていません")
             continue
-        # Validate the copied exercise itself, not only its A-D explanations.
         source_block = str(review["block"])
         selections = re.findall(r"^- \[[xX]\] ([A-E])\. (.+)$", source_block, re.MULTILINE)
-        expected_answer = (f"{selections[0][0]}. {selections[0][1]}"
-                           if selections else "\u672a\u9078\u629e")
+        expected_answer = (
+            f"{selections[0][0]}. {selections[0][1]}" if selections else "未選択"
+        )
         if field(record, "Your Answer", r"[^\n]+") != expected_answer:
             errors.append(f"{label}: Your Answer does not match the Session")
         correct = field(record, "Correct Answer", r"[^\n]+")
@@ -306,12 +326,12 @@ def verify(root: Path) -> int:
             errors.append(f"{label}: Correct Answer must match one original option")
         elif selections and selections[0][0] == answer_match[1]:
             errors.append(f"{label}: incorrect answer is marked as the correct option")
-        model = re.search(r"^### \u6a21\u7bc4\u89e3\u7b54\n\n(.*?)\n\n### ", record, re.MULTILINE | re.DOTALL)
-        if not model or model[1].strip() != correct:
+        model = markdown_section(record, "模範解答")
+        if model != correct:
             errors.append(f"{label}: model answer does not match Correct Answer")
-        original_problem = re.search(r"^### \u554f\u984c\n\n(.*?)\n\n- \[[ xX]\] A\.", source_block, re.MULTILINE | re.DOTALL)
-        copied_problem = re.search(r"^### \u554f\u984c\n\n(.*?)\n\n### ", record, re.MULTILINE | re.DOTALL)
-        if not original_problem or not copied_problem or original_problem[1].strip() != copied_problem[1].strip():
+        original_problem = source_problem_text(source_block)
+        copied_problem = markdown_section(record, "問題")
+        if original_problem is None or copied_problem is None or original_problem != copied_problem:
             errors.append(f"{label}: copied problem does not match the Session")
         for choice, option in options.items():
             formatted = re.search(
