@@ -37,6 +37,8 @@ def measure(chunks: list[bytes]) -> dict[str, int]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--baseline-layout', choices=('auto', 'legacy', 'routed'), default='auto',
+                        help='Layout of baseline instructions; auto detects the routed entrypoint')
     parser.add_argument('--root', type=Path, default=Path(__file__).resolve().parents[1])
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument('--base-ref')
@@ -49,22 +51,28 @@ def main() -> int:
             return (args.baseline_dir / path).read_bytes()
         return subprocess.check_output(['git', 'show', f'{args.base_ref}:{path}'], cwd=root)
 
-    output = {'method': 'Unique required instruction files per task; whole files, including frontmatter. '
+    layout = args.baseline_layout
+    if layout == 'auto':
+        layout = 'routed' if all(path.removeprefix(PREFIX) in before(ENTRY).decode('utf-8')
+                                 for path in AFTER['register'][1:]) else 'legacy'
+    baseline_tasks = AFTER if layout == 'routed' else BEFORE
+
+    output = {'baseline_layout': layout, 'method': 'Unique required instruction files per task; whole files, including frontmatter. '
                         'Excludes AGENTS, README, study data, script source, tool output and chat history. '
                         'Measures documented loading, not observed model usage.',
               'tasks': {}}
     for task in BEFORE:
-        old = measure([before(path) for path in BEFORE[task]])
+        old = measure([before(path) for path in baseline_tasks[task]])
         new = measure([(root / path).read_bytes() for path in AFTER[task]])
         reduction = {key: round(100 * (1 - new[key] / old[key]), 2) for key in old}
         output['tasks'][task] = {'before': old, 'after': new, 'reduction_percent': reduction,
-                                 'before_paths': BEFORE[task], 'after_paths': AFTER[task]}
-    before_docs = list(dict.fromkeys(path for paths in BEFORE.values() for path in paths))
+                                 'before_paths': baseline_tasks[task], 'after_paths': AFTER[task]}
+    before_docs = list(dict.fromkeys(path for paths in baseline_tasks.values() for path in paths))
     after_docs = sorted((root / PREFIX).rglob('*.md'))
     output['all_instruction_files'] = {
         'before': measure([before(path) for path in before_docs]),
         'after': measure([path.read_bytes() for path in after_docs]),
-        'note': 'Total documentation grows; only the task-specific reading sets get smaller.',
+        'note': 'Total stored instructions and per-task reading sets are separate metrics.',
     }
     print(json.dumps(output, ensure_ascii=False, indent=2))
     return 0
