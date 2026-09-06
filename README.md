@@ -48,4 +48,4 @@ python3 -m unittest discover -s tests -v
 python3 skills/a1-adaptive-review/scripts/verify_review_sessions.py
 ```
 
-テストは一時ディレクトリの合成データを使い、実際の学習記録を変更しません。2行目は実リポジトリ全体の既存履歴監査です。[改善レビューと検証範囲](docs/skill-review-2026-09-06.md) に測定方法と制約を記載しています。
+テストは一時ディレクトリの合成データを使い、実際の学習記録を変更しません。2行目は実リポジトリ全体の既存履歴監査です。
