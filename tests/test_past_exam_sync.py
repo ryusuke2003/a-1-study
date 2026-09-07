@@ -14,6 +14,7 @@ BLOCK_RE = re.compile(
     r"<!-- past-exam-sync: (?P=key):end -->",
     re.DOTALL,
 )
+QUESTION_RE = re.compile(r"#午前I-問(?P<number>\d+)$")
 
 
 class PastExamSyncTest(unittest.TestCase):
@@ -43,6 +44,16 @@ class PastExamSyncTest(unittest.TestCase):
             self.assertTrue(target_path.startswith("過去問/"), key)
             self.assertEqual(target_path, past_path, key)
             self.assertEqual(source_body, past_body, key)
+
+    def test_past_exam_blocks_are_sorted_by_question_number(self) -> None:
+        for path in sorted((ROOT / "過去問").rglob("*.md")):
+            text = path.read_text(encoding="utf-8")
+            numbers = []
+            for key in START_RE.findall(text):
+                match = QUESTION_RE.search(key)
+                if match:
+                    numbers.append(int(match.group("number")))
+            self.assertEqual(numbers, sorted(numbers), f"question order: {path}")
 
 
 if __name__ == "__main__":
