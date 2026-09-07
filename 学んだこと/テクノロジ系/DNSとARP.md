@@ -60,9 +60,6 @@ Printer: 「私です。MACは aa:bb:cc:dd:ee:ff」
 PC: IP ↔ MAC の対応をARPキャッシュへ一時保存
 ```
 
-- IPv6ではARPではなく**NDP（Neighbor Discovery Protocol）**を利用する。
-- 現代のOSでは `ip neigh` など別のコマンドで近隣キャッシュを確認できる場合もあるが、この設問の選択肢では `arp` が正解である。
-
 #### Related To
 
 - A1-0186（MACアドレス・ARP・NDP）
