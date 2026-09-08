@@ -70,3 +70,19 @@ PC: IP ↔ MAC の対応をARPキャッシュへ一時保存
 - [IPA：令和6年度秋期 高度試験 午前Ⅰ 問題](https://www.ipa.go.jp/shiken/mondai-kaiotu/m42obm000000afqx-att/2024r06a_koudo_am1_qs.pdf)
 - [IPA：令和6年度秋期 高度試験 午前Ⅰ 解答例](https://www.ipa.go.jp/shiken/mondai-kaiotu/m42obm000000afqx-att/2024r06a_koudo_am1_ans.pdf)
 <!-- past-exam-sync: 過去問/令和6年度秋季解説.md#午前I-問12:end -->
+
+## 2026-09-08
+
+### CNとCNAMEの違い
+
+| 用語 | 層・場所 | 意味 | 例 |
+| --- | --- | --- | --- |
+| **CN（Common Name）** | TLS証明書のSubject | 証明書に記載される名前 | `CN=example.com` |
+| **CNAME（Canonical Name）** | DNSのリソースレコード | ホスト名の別名を正規名へ対応付けるレコード種別 | `www.example.com CNAME example.com` |
+
+- 名前は似ているが、**CNは証明書の名前、CNAMEはDNSの別名レコード**であり、同じものではない。
+
+#### Related To
+
+- A1-0284（DNSの正引き・逆引きと主要レコード）
+- A1-0298（CNとCNAMEの違い）
